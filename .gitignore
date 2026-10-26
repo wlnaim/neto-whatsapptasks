@@ -55,3 +55,20 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# --- Especifico de este proyecto ---
+publish/
+.vs/
+.code-review-graph/
+*.db
+*.db-shm
+*.db-wal
+*.user
+TestResults/
+# Secretos locales: nunca subir
+.env
+*.env
+!.env.example
+anthropic-api-key*.txt
+# Notas internas de trabajo (contienen rutas y datos locales)
+engineering/
