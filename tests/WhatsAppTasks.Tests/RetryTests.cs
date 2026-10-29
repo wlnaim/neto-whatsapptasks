@@ -93,9 +93,9 @@ public sealed class RetryTests
         try
         {
             await using var repository = new SqliteTaskRepository(path); var now = DateTimeOffset.UtcNow;
-            var task = new ScheduledTask(0, "IA", true, "52", "9831735992", MessageKind.AnthropicPrompt, "", "redacta", new ScheduleDefinition(ScheduleKind.Daily, TimeOnly.FromDateTime(now.LocalDateTime), DateOnly.FromDateTime(now.LocalDateTime), new HashSet<DayOfWeek>(), 1), now, now);
+            var task = new ScheduledTask(0, "IA", true, "52", "5555555555", MessageKind.AnthropicPrompt, "", "redacta", new ScheduleDefinition(ScheduleKind.Daily, TimeOnly.FromDateTime(now.LocalDateTime), DateOnly.FromDateTime(now.LocalDateTime), new HashSet<DayOfWeek>(), 1), now, now);
             var taskId = await repository.CreateTaskAsync(task); var claim = await repository.ClaimExecutionAsync(new(taskId, now.AddMinutes(1)), (await repository.GetTaskAsync(taskId))!);
-            await repository.CompleteExecutionAsync(new ExecutionRecord(claim, taskId, "IA", now, now, ExecutionStatus.Failed, MessageKind.AnthropicPrompt, "529831735992", "", 0, 0, "generation failed"));
+            await repository.CompleteExecutionAsync(new ExecutionRecord(claim, taskId, "IA", now, now, ExecutionStatus.Failed, MessageKind.AnthropicPrompt, "525555555555", "", 0, 0, "generation failed"));
             Assert.False((await repository.ClaimManualRetryAsync(claim)).Accepted);
         }
         finally { DeleteDatabase(path); }
@@ -173,7 +173,7 @@ public sealed class RetryTests
             await using (var db = new SqliteConnection($"Data Source={path}"))
             {
                 await db.OpenAsync(); await using var command = db.CreateCommand();
-                command.CommandText = "CREATE TABLE Executions (Id INTEGER PRIMARY KEY AUTOINCREMENT,TaskId INTEGER NOT NULL,DueAtUtc TEXT NOT NULL,TaskName TEXT NOT NULL,StartedUtc TEXT NOT NULL,FinishedUtc TEXT NULL,Status INTEGER NOT NULL,MessageKind INTEGER NOT NULL,Recipient TEXT NOT NULL,Message TEXT NOT NULL,SentPartCount INTEGER NOT NULL,TotalPartCount INTEGER NOT NULL,Error TEXT NOT NULL,UNIQUE(TaskId,DueAtUtc)); INSERT INTO Executions(TaskId,DueAtUtc,TaskName,StartedUtc,FinishedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error) VALUES(1,'2026-10-24T00:00:00.0000000+00:00','legado','2026-10-24T00:00:00.0000000+00:00',NULL,0,0,'529831735992','legado',0,1,'');";
+                command.CommandText = "CREATE TABLE Executions (Id INTEGER PRIMARY KEY AUTOINCREMENT,TaskId INTEGER NOT NULL,DueAtUtc TEXT NOT NULL,TaskName TEXT NOT NULL,StartedUtc TEXT NOT NULL,FinishedUtc TEXT NULL,Status INTEGER NOT NULL,MessageKind INTEGER NOT NULL,Recipient TEXT NOT NULL,Message TEXT NOT NULL,SentPartCount INTEGER NOT NULL,TotalPartCount INTEGER NOT NULL,Error TEXT NOT NULL,UNIQUE(TaskId,DueAtUtc)); INSERT INTO Executions(TaskId,DueAtUtc,TaskName,StartedUtc,FinishedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error) VALUES(1,'2026-10-24T00:00:00.0000000+00:00','legado','2026-10-24T00:00:00.0000000+00:00',NULL,0,0,'525555555555','legado',0,1,'');";
                 await command.ExecuteNonQueryAsync();
             }
             await using (var repository = new SqliteTaskRepository(path)) { Assert.Single(await repository.GetHistorySinceAsync(new DateTimeOffset(2026, 10, 23, 0, 0, 0, TimeSpan.Zero))); }
@@ -186,10 +186,10 @@ public sealed class RetryTests
     private static async Task<ExecutionRecord> CreatePartialRootAsync(SqliteTaskRepository repository, int sent, string message)
     {
         var now = DateTimeOffset.UtcNow;
-        var task = new ScheduledTask(0, "Histórica", true, "52", "9831735992", MessageKind.Fixed, message, "", new ScheduleDefinition(ScheduleKind.Daily, TimeOnly.FromDateTime(now.LocalDateTime), DateOnly.FromDateTime(now.LocalDateTime), new HashSet<DayOfWeek>(), 1), now, now);
+        var task = new ScheduledTask(0, "Histórica", true, "52", "5555555555", MessageKind.Fixed, message, "", new ScheduleDefinition(ScheduleKind.Daily, TimeOnly.FromDateTime(now.LocalDateTime), DateOnly.FromDateTime(now.LocalDateTime), new HashSet<DayOfWeek>(), 1), now, now);
         var taskId = await repository.CreateTaskAsync(task); var saved = (await repository.GetTaskAsync(taskId))!; var claim = await repository.ClaimExecutionAsync(new(taskId, now.AddMinutes(1)), saved);
         var total = new MessageSplitter().Split(message).Count;
-        var root = new ExecutionRecord(claim, taskId, saved.Name, now, DateTimeOffset.UtcNow, sent == 0 ? ExecutionStatus.Failed : ExecutionStatus.Partial, MessageKind.Fixed, "529831735992", message, sent, total, "failure");
+        var root = new ExecutionRecord(claim, taskId, saved.Name, now, DateTimeOffset.UtcNow, sent == 0 ? ExecutionStatus.Failed : ExecutionStatus.Partial, MessageKind.Fixed, "525555555555", message, sent, total, "failure");
         await repository.CompleteExecutionAsync(root); return root;
     }
 

@@ -3,14 +3,14 @@ namespace WhatsAppTasks.Core;
 /// <summary>Continuously dispatches due work without waiting for other sends; a detected resume gap drops missed occurrences.</summary>
 public sealed class BackgroundTaskScheduler : ITaskScheduler, IManualRetryService
 {
-    private readonly ITaskRepository _repository; private readonly MessageExecutor _executor; private readonly TimeProvider _clock; private readonly SemaphoreSlim _runGate = new(1, 1);
+    private readonly ITaskRepository _repository; private readonly MessageExecutor _executor; private readonly TimeProvider _clock; private readonly IAppLogger _logger; private readonly SemaphoreSlim _runGate = new(1, 1);
     private readonly SemaphoreSlim _dispatchGate = new(1, 1);
     private readonly Dictionary<long, Pending> _pending = new(); private readonly List<Task> _inFlight = new();
     private CancellationTokenSource? _lifetime; private CancellationTokenSource? _workCancellation; private Task? _loop; private DateTimeOffset? _lastRunUtc; private bool _stopping;
     public Exception? LastError { get; private set; }
 
-    public BackgroundTaskScheduler(ITaskRepository repository, MessageExecutor executor, TimeProvider? clock = null) { _repository = repository; _executor = executor; _clock = clock ?? TimeProvider.System; }
-    public BackgroundTaskScheduler(ITaskRepository repository, IEvolutionClient evolution, IAnthropicClient anthropic, IMessageSplitter splitter, IAsyncDelay delay, TimeProvider? clock = null) : this(repository, new MessageExecutor(repository, evolution, anthropic, splitter, delay), clock) { }
+    public BackgroundTaskScheduler(ITaskRepository repository, MessageExecutor executor, TimeProvider? clock = null, IAppLogger? logger = null) { _repository = repository; _executor = executor; _clock = clock ?? TimeProvider.System; _logger = logger ?? NullAppLogger.Instance; }
+    public BackgroundTaskScheduler(ITaskRepository repository, IEvolutionClient evolution, IAnthropicClient anthropic, IMessageSplitter splitter, IAsyncDelay delay, TimeProvider? clock = null, IAppLogger? logger = null) : this(repository, new MessageExecutor(repository, evolution, anthropic, splitter, delay, logger: logger), clock, logger) { }
 
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -49,7 +49,7 @@ public sealed class BackgroundTaskScheduler : ITaskScheduler, IManualRetryServic
             foreach (var task in tasks.Where(x => x.IsEnabled)) AddFuture(task, now);
             _lastRunUtc = now;
         }
-        catch (Exception error) { LastError = error; throw; }
+        catch (Exception error) { LogSchedulerFailure(error); LastError = error; throw; }
         finally { _runGate.Release(); }
     }
 
@@ -73,7 +73,7 @@ public sealed class BackgroundTaskScheduler : ITaskScheduler, IManualRetryServic
                 }
                 var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _workCancellation.Token);
                 var work = Task.Run(async () => { using (linked) return await _executor.ExecuteManualRetryAsync(plan, linked.Token); }, CancellationToken.None);
-                _ = work.ContinueWith(x => LastError = x.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+                _ = work.ContinueWith(x => { LastError = x.Exception; LogSchedulerFailure(x.Exception!); }, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
                 lock (_inFlight) { _inFlight.RemoveAll(x => x.IsCompleted); _inFlight.Add(work); }
                 return new(true, "", plan.RetryExecution);
             }
@@ -101,7 +101,7 @@ public sealed class BackgroundTaskScheduler : ITaskScheduler, IManualRetryServic
                 AddFuture(due.Task, due.DueAtUtc.AddTicks(1));
                 var token = _workCancellation?.Token ?? cancellationToken;
                 var work = Task.Run(() => _executor.ExecuteAsync(due.Task, due.DueAtUtc, token), CancellationToken.None);
-                _ = work.ContinueWith(x => LastError = x.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+                _ = work.ContinueWith(x => { LastError = x.Exception; LogSchedulerFailure(x.Exception!); }, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
                 lock (_inFlight) { _inFlight.RemoveAll(x => x.IsCompleted); _inFlight.Add(work); }
             }
         }
@@ -122,11 +122,16 @@ public sealed class BackgroundTaskScheduler : ITaskScheduler, IManualRetryServic
         {
             try { await RunOnceAsync(_clock.GetUtcNow(), token); }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
-            catch (Exception error) { LastError = error; }
+            catch (Exception error) { LogSchedulerFailure(error); LastError = error; }
             if (!await timer.WaitForNextTickAsync(token)) break;
         }
     }
 
     public async ValueTask DisposeAsync() { await StopAsync(); _runGate.Dispose(); _dispatchGate.Dispose(); }
+    private void LogSchedulerFailure(Exception error)
+    {
+        using var scope = _logger.BeginScope(AppLogOperation.Scheduler, Guid.NewGuid().ToString("N"));
+        _logger.Write(AppLogEvent.SchedulerFailed, exception: error);
+    }
     private sealed record Pending(ScheduledTask Task, DateTimeOffset DueAtUtc);
 }

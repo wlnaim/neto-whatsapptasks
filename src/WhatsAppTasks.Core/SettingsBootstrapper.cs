@@ -16,7 +16,7 @@ public static class SettingsBootstrapper
         var header = request.GetProperty("header").EnumerateArray().FirstOrDefault(x => string.Equals(x.GetProperty("key").GetString(), "Apikey", StringComparison.OrdinalIgnoreCase));
         var key = header.ValueKind == JsonValueKind.Undefined ? null : header.GetProperty("value").GetString();
         if (string.IsNullOrWhiteSpace(key)) throw new InvalidDataException("The Postman API key is missing.");
-        await repository.SaveSettingsAsync(new($"{uri.Scheme}://{uri.Authority}", pieces[2], SettingsProtection.Protect(key), anthropicKeyPath, defaultModel), cancellationToken);
+        await repository.SaveSettingsAsync(new($"{uri.Scheme}://{uri.Authority}", pieces[2], SettingsProtection.Protect(key), anthropicKeyPath, defaultModel) { MaximumMessageLength = current.MaximumMessageLength }, cancellationToken);
         return true;
     }
 }

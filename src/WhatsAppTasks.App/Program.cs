@@ -12,38 +12,58 @@ internal static class Program
         if (!firstInstance) return;
         var dataDirectory = GetOption(args, "--data-dir") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WhatsAppTasks");
         Directory.CreateDirectory(dataDirectory);
+        var logsDirectory = Path.Combine(AppContext.BaseDirectory, "Logs");
+        using var logger = new JsonlAppLogger(logsDirectory);
         ApplicationConfiguration.Initialize();
-        Application.ThreadException += (_, _) => MessageBox.Show("No se pudo completar la operación. Revisa la configuración y vuelve a intentarlo.", "WhatsApp Tasks", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        Application.ThreadException += (_, e) =>
+        {
+            using var scope = logger.BeginScope(AppLogOperation.Ui);
+            logger.Write(AppLogEvent.UiOperationFailed, exception: e.Exception);
+            MessageBox.Show($"No se pudo completar la operación. Registro: {scope.CorrelationId}\nLogs: {logsDirectory}", "WhatsApp Tasks", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            using var scope = logger.BeginScope(AppLogOperation.Startup);
+            logger.Write(AppLogEvent.StartupFailed, exception: e.ExceptionObject as Exception);
+        };
 
         var repository = new SqliteTaskRepository(Path.Combine(dataDirectory, "WhatsAppTasks.db"));
         var httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(90) };
-        var executor = new MessageExecutor(repository, new EvolutionClient(httpClient, repository), new AnthropicClient(httpClient, repository), new MessageSplitter(), new SystemAsyncDelay(), new ClaudeCodeRunner());
-        var scheduler = new BackgroundTaskScheduler(repository, executor);
-        using var form = new MainForm(repository, scheduler);
+        var catalogHttpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(5) };
+        var sendingClient = new EvolutionClient(httpClient, repository, logger: logger);
+        var catalogClient = new EvolutionClient(catalogHttpClient, repository, logger: logger);
+        var executor = new MessageExecutor(repository, sendingClient, new AnthropicClient(httpClient, repository), new MessageSplitter(), new SystemAsyncDelay(), new ClaudeCodeRunner(), logger: logger);
+        var scheduler = new BackgroundTaskScheduler(repository, executor, logger: logger);
+        using var form = new MainForm(repository, scheduler, catalogClient, logger, logsDirectory);
         using var context = new ApplicationContext();
         form.ExitRequested += async (_, _) =>
         {
             try { await scheduler.StopAsync(); }
-            catch { /* closing must still terminate; errors are not shown from shutdown */ }
+            catch (Exception error) { using var scope = logger.BeginScope(AppLogOperation.Scheduler); logger.Write(AppLogEvent.SchedulerFailed, exception: error); }
             context.ExitThread();
         };
         var showAtStartup = args.Any(x => string.Equals(x, "--show", StringComparison.OrdinalIgnoreCase));
         _ = form.Handle;
         form.BeginInvoke(async () =>
         {
+            using var startupScope = logger.BeginScope(AppLogOperation.Startup);
+            logger.Write(AppLogEvent.StartupStarted);
             try
             {
                 try { await BootstrapSettingsAsync(repository); }
-                catch
+                catch (Exception error)
                 {
+                    logger.Write(AppLogEvent.StartupFailed, exception: error);
                     MessageBox.Show("No se pudo importar la configuración inicial. Puedes configurarla desde la pestaña Configuración.", "WhatsApp Tasks", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
                 await scheduler.StartAsync();
                 await form.InitializeAsync();
                 if (showAtStartup) form.ShowInterface();
+                logger.Write(AppLogEvent.StartupCompleted);
             }
-            catch
+            catch (Exception error)
             {
+                logger.Write(AppLogEvent.StartupFailed, exception: error);
                 MessageBox.Show("No se pudo iniciar la aplicación. Revisa la configuración y vuelve a intentarlo.", "WhatsApp Tasks", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 form.RequestExit();
             }
@@ -52,6 +72,7 @@ internal static class Program
         scheduler.DisposeAsync().AsTask().GetAwaiter().GetResult();
         repository.DisposeAsync().AsTask().GetAwaiter().GetResult();
         httpClient.Dispose();
+        catalogHttpClient.Dispose();
     }
 
     private static async Task BootstrapSettingsAsync(ITaskRepository repository)

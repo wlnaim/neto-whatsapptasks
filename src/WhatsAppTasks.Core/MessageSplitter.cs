@@ -7,7 +7,8 @@ public sealed class MessageSplitter : IMessageSplitter
         ArgumentNullException.ThrowIfNull(text);
         if (maximumLength < 1) throw new ArgumentOutOfRangeException(nameof(maximumLength));
         if (text.Length == 0) return new[] { string.Empty };
-        var parts = new List<string>((text.Length + maximumLength - 1) / maximumLength);
+        // Avoid overflow for a valid, very large configured limit. A surrogate pair may occupy two UTF-16 units when limit is one.
+        var parts = new List<string>();
         for (var index = 0; index < text.Length;)
         {
             var length = Math.Min(maximumLength, text.Length - index);

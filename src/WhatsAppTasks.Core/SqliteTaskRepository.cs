@@ -21,7 +21,7 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
     public async Task<IReadOnlyList<ScheduledTask>> GetTasksAsync(CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken); await using var db = Open(); await using var cmd = db.CreateCommand();
-        cmd.CommandText = "SELECT Id,Name,Enabled,CountryCode,PhoneNumber,MessageKind,FixedMessage,AnthropicPrompt,Schedule,CreatedUtc,UpdatedUtc,AgentWorkingDirectory,AgentAllowedTools,AgentTimeoutMinutes FROM Tasks ORDER BY Id";
+        cmd.CommandText = "SELECT Id,Name,Enabled,CountryCode,PhoneNumber,MessageKind,FixedMessage,AnthropicPrompt,Schedule,CreatedUtc,UpdatedUtc,AgentWorkingDirectory,AgentAllowedTools,AgentTimeoutMinutes,RecipientKind,GroupJid,GroupName FROM Tasks ORDER BY Id";
         var result = new List<ScheduledTask>(); await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken)) result.Add(ReadTask(reader)); return result;
     }
@@ -29,7 +29,7 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
     public async Task<ScheduledTask?> GetTaskAsync(long id, CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken); await using var db = Open(); await using var cmd = db.CreateCommand();
-        cmd.CommandText = "SELECT Id,Name,Enabled,CountryCode,PhoneNumber,MessageKind,FixedMessage,AnthropicPrompt,Schedule,CreatedUtc,UpdatedUtc,AgentWorkingDirectory,AgentAllowedTools,AgentTimeoutMinutes FROM Tasks WHERE Id=$id"; cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = "SELECT Id,Name,Enabled,CountryCode,PhoneNumber,MessageKind,FixedMessage,AnthropicPrompt,Schedule,CreatedUtc,UpdatedUtc,AgentWorkingDirectory,AgentAllowedTools,AgentTimeoutMinutes,RecipientKind,GroupJid,GroupName FROM Tasks WHERE Id=$id"; cmd.Parameters.AddWithValue("$id", id);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken); return await reader.ReadAsync(cancellationToken) ? ReadTask(reader) : null;
     }
 
@@ -38,7 +38,7 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
         ValidateTask(task); await EnsureInitializedAsync(cancellationToken); await _gate.WaitAsync(cancellationToken); try
         {
             await using var db = Open(); await using var cmd = db.CreateCommand();
-            cmd.CommandText = "INSERT INTO Tasks(Name,Enabled,CountryCode,PhoneNumber,MessageKind,FixedMessage,AnthropicPrompt,Schedule,CreatedUtc,UpdatedUtc,AgentWorkingDirectory,AgentAllowedTools,AgentTimeoutMinutes) VALUES($name,$enabled,$country,$phone,$kind,$fixed,$prompt,$schedule,$created,$updated,$agentDir,$agentTools,$agentTimeout); SELECT last_insert_rowid();";
+            cmd.CommandText = "INSERT INTO Tasks(Name,Enabled,CountryCode,PhoneNumber,MessageKind,FixedMessage,AnthropicPrompt,Schedule,CreatedUtc,UpdatedUtc,AgentWorkingDirectory,AgentAllowedTools,AgentTimeoutMinutes,RecipientKind,GroupJid,GroupName) VALUES($name,$enabled,$country,$phone,$kind,$fixed,$prompt,$schedule,$created,$updated,$agentDir,$agentTools,$agentTimeout,$recipientKind,$groupJid,$groupName); SELECT last_insert_rowid();";
             BindTask(cmd, task); return Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
         }
         finally { _gate.Release(); }
@@ -50,7 +50,7 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
         {
             task = task with { UpdatedUtc = DateTimeOffset.UtcNow };
             await using var db = Open(); await using var cmd = db.CreateCommand();
-            cmd.CommandText = "UPDATE Tasks SET Name=$name,Enabled=$enabled,CountryCode=$country,PhoneNumber=$phone,MessageKind=$kind,FixedMessage=$fixed,AnthropicPrompt=$prompt,Schedule=$schedule,UpdatedUtc=$updated,AgentWorkingDirectory=$agentDir,AgentAllowedTools=$agentTools,AgentTimeoutMinutes=$agentTimeout WHERE Id=$id";
+            cmd.CommandText = "UPDATE Tasks SET Name=$name,Enabled=$enabled,CountryCode=$country,PhoneNumber=$phone,MessageKind=$kind,FixedMessage=$fixed,AnthropicPrompt=$prompt,Schedule=$schedule,UpdatedUtc=$updated,AgentWorkingDirectory=$agentDir,AgentAllowedTools=$agentTools,AgentTimeoutMinutes=$agentTimeout,RecipientKind=$recipientKind,GroupJid=$groupJid,GroupName=$groupName WHERE Id=$id";
             BindTask(cmd, task); cmd.Parameters.AddWithValue("$id", task.Id);
             if (await cmd.ExecuteNonQueryAsync(cancellationToken) != 1) throw new InvalidOperationException("The task no longer exists.");
         }
@@ -62,11 +62,22 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
         await EnsureInitializedAsync(cancellationToken); await _gate.WaitAsync(cancellationToken); try { await using var db = Open(); await using var cmd = db.CreateCommand(); cmd.CommandText = "DELETE FROM Tasks WHERE Id=$id"; cmd.Parameters.AddWithValue("$id", id); await cmd.ExecuteNonQueryAsync(cancellationToken); } finally { _gate.Release(); }
     }
 
+    public async Task SetTaskEnabledAsync(long id, bool enabled, CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken); await _gate.WaitAsync(cancellationToken); try
+        {
+            await using var db = Open(); await using var cmd = db.CreateCommand(); cmd.CommandText = "UPDATE Tasks SET Enabled=$enabled,UpdatedUtc=$updated WHERE Id=$id";
+            cmd.Parameters.AddWithValue("$enabled", enabled ? 1 : 0); cmd.Parameters.AddWithValue("$updated", Utc(DateTimeOffset.UtcNow)); cmd.Parameters.AddWithValue("$id", id);
+            if (await cmd.ExecuteNonQueryAsync(cancellationToken) != 1) throw new InvalidOperationException("The task no longer exists.");
+        }
+        finally { _gate.Release(); }
+    }
+
     public async Task<AppSettings> GetSettingsAsync(CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken); await using var db = Open(); await using var cmd = db.CreateCommand();
-        cmd.CommandText = "SELECT EvolutionBaseUrl,EvolutionInstanceName,ProtectedEvolutionApiKey,AnthropicApiKeyFilePath,AnthropicModel FROM Settings WHERE Id=1";
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken); return await reader.ReadAsync(cancellationToken) ? new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)) : AppSettings.Empty;
+        cmd.CommandText = "SELECT EvolutionBaseUrl,EvolutionInstanceName,ProtectedEvolutionApiKey,AnthropicApiKeyFilePath,AnthropicModel,MaximumMessageLength FROM Settings WHERE Id=1";
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken); return await reader.ReadAsync(cancellationToken) ? new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)) { MaximumMessageLength = reader.GetInt32(5) } : AppSettings.Empty;
     }
 
     public async Task SaveSettingsAsync(AppSettings settings, CancellationToken cancellationToken = default)
@@ -74,8 +85,30 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(settings); await EnsureInitializedAsync(cancellationToken); await _gate.WaitAsync(cancellationToken); try
         {
             await using var db = Open(); await using var cmd = db.CreateCommand();
-            cmd.CommandText = "INSERT INTO Settings(Id,EvolutionBaseUrl,EvolutionInstanceName,ProtectedEvolutionApiKey,AnthropicApiKeyFilePath,AnthropicModel) VALUES(1,$url,$instance,$key,$path,$model) ON CONFLICT(Id) DO UPDATE SET EvolutionBaseUrl=$url,EvolutionInstanceName=$instance,ProtectedEvolutionApiKey=$key,AnthropicApiKeyFilePath=$path,AnthropicModel=$model";
-            cmd.Parameters.AddWithValue("$url", settings.EvolutionBaseUrl ?? ""); cmd.Parameters.AddWithValue("$instance", settings.EvolutionInstanceName ?? ""); cmd.Parameters.AddWithValue("$key", settings.ProtectedEvolutionApiKey ?? ""); cmd.Parameters.AddWithValue("$path", settings.AnthropicApiKeyFilePath ?? ""); cmd.Parameters.AddWithValue("$model", settings.AnthropicModel ?? ""); await cmd.ExecuteNonQueryAsync(cancellationToken);
+            if (settings.MaximumMessageLength < 1) throw new ArgumentOutOfRangeException(nameof(settings), "Maximum message length must be positive.");
+            cmd.CommandText = "INSERT INTO Settings(Id,EvolutionBaseUrl,EvolutionInstanceName,ProtectedEvolutionApiKey,AnthropicApiKeyFilePath,AnthropicModel,MaximumMessageLength) VALUES(1,$url,$instance,$key,$path,$model,$maximum) ON CONFLICT(Id) DO UPDATE SET EvolutionBaseUrl=$url,EvolutionInstanceName=$instance,ProtectedEvolutionApiKey=$key,AnthropicApiKeyFilePath=$path,AnthropicModel=$model,MaximumMessageLength=$maximum";
+            cmd.Parameters.AddWithValue("$url", settings.EvolutionBaseUrl ?? ""); cmd.Parameters.AddWithValue("$instance", settings.EvolutionInstanceName ?? ""); cmd.Parameters.AddWithValue("$key", settings.ProtectedEvolutionApiKey ?? ""); cmd.Parameters.AddWithValue("$path", settings.AnthropicApiKeyFilePath ?? ""); cmd.Parameters.AddWithValue("$model", settings.AnthropicModel ?? ""); cmd.Parameters.AddWithValue("$maximum", settings.MaximumMessageLength); await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<IReadOnlyList<WhatsAppGroup>> GetWhatsAppGroupsAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken); await using var db = Open(); await using var cmd = db.CreateCommand(); cmd.CommandText = "SELECT Id,Name FROM WhatsAppGroups ORDER BY Name,Id";
+        var groups = new List<WhatsAppGroup>(); await using var reader = await cmd.ExecuteReaderAsync(cancellationToken); while (await reader.ReadAsync(cancellationToken)) groups.Add(new(reader.GetString(0), reader.GetString(1))); return groups;
+    }
+
+    public async Task ReplaceWhatsAppGroupsAsync(IReadOnlyList<WhatsAppGroup> groups, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(groups); if (groups.Any(x => string.IsNullOrWhiteSpace(x.Id) || string.IsNullOrWhiteSpace(x.Name))) throw new ArgumentException("Every WhatsApp group needs an id and name.", nameof(groups));
+        await EnsureInitializedAsync(cancellationToken); await _gate.WaitAsync(cancellationToken); try
+        {
+            await using var db = Open(); using var transaction = db.BeginTransaction(); await using var clear = db.CreateCommand(); clear.Transaction = transaction; clear.CommandText = "DELETE FROM WhatsAppGroups"; await clear.ExecuteNonQueryAsync(cancellationToken);
+            foreach (var group in groups.DistinctBy(x => x.Id, StringComparer.Ordinal))
+            {
+                await using var insert = db.CreateCommand(); insert.Transaction = transaction; insert.CommandText = "INSERT INTO WhatsAppGroups(Id,Name) VALUES($id,$name)"; insert.Parameters.AddWithValue("$id", group.Id); insert.Parameters.AddWithValue("$name", group.Name); await insert.ExecuteNonQueryAsync(cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
         }
         finally { _gate.Release(); }
     }
@@ -83,13 +116,13 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
     public async Task<IReadOnlyList<ExecutionRecord>> GetHistorySinceAsync(DateTimeOffset sinceUtc, CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken); await using var db = Open(); await using var cmd = db.CreateCommand();
-        cmd.CommandText = "SELECT Id,TaskId,TaskName,StartedUtc,FinishedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error,RetryOfExecutionId,RetryRootExecutionId,RetryStartPartIndex FROM Executions WHERE StartedUtc >= $since ORDER BY StartedUtc DESC"; cmd.Parameters.AddWithValue("$since", Utc(sinceUtc)); return await ReadRecordsAsync(cmd, cancellationToken);
+        cmd.CommandText = "SELECT Id,TaskId,TaskName,StartedUtc,FinishedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error,RetryOfExecutionId,RetryRootExecutionId,RetryStartPartIndex,ChunkSize,RecipientKind,RecipientName FROM Executions WHERE StartedUtc >= $since ORDER BY StartedUtc DESC"; cmd.Parameters.AddWithValue("$since", Utc(sinceUtc)); return await ReadRecordsAsync(cmd, cancellationToken);
     }
 
     public async Task<ExecutionRecord?> GetExecutionAsync(long id, CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken); await using var db = Open(); await using var cmd = db.CreateCommand();
-        cmd.CommandText = "SELECT Id,TaskId,TaskName,StartedUtc,FinishedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error,RetryOfExecutionId,RetryRootExecutionId,RetryStartPartIndex FROM Executions WHERE Id=$id"; cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = "SELECT Id,TaskId,TaskName,StartedUtc,FinishedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error,RetryOfExecutionId,RetryRootExecutionId,RetryStartPartIndex,ChunkSize,RecipientKind,RecipientName FROM Executions WHERE Id=$id"; cmd.Parameters.AddWithValue("$id", id);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken); return await reader.ReadAsync(cancellationToken) ? ReadRecord(reader) : null;
     }
 
@@ -102,7 +135,7 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
             if (source is null || source.Status is not (ExecutionStatus.Failed or ExecutionStatus.Partial or ExecutionStatus.Cancelled)) return await RollbackPlanAsync("Solo se pueden reintentar ejecuciones fallidas, parciales o canceladas.");
             var rootId = source.RetryRootExecutionId ?? source.Id;
             var root = await ReadExecutionInTransactionAsync(db, tx, rootId, cancellationToken) ?? source;
-            if (string.IsNullOrEmpty(root.Message) || !Digits(root.Recipient) || root.TotalPartCount <= 0) return await RollbackPlanAsync("La ejecución no conserva contenido válido para reenviar.");
+            if (string.IsNullOrEmpty(root.Message) || (root.RecipientKind == RecipientKind.Phone && !Digits(root.Recipient)) || (root.RecipientKind == RecipientKind.Group && string.IsNullOrWhiteSpace(root.Recipient)) || root.TotalPartCount <= 0) return await RollbackPlanAsync("La ejecución no conserva contenido válido para reenviar.");
             int firstPending;
             await using (var progress = db.CreateCommand())
             {
@@ -112,13 +145,13 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
             if (firstPending < 0 || firstPending >= root.TotalPartCount) return await RollbackPlanAsync("No quedan partes pendientes para reenviar.");
             var now = DateTimeOffset.UtcNow;
             await using var insert = db.CreateCommand(); insert.Transaction = tx;
-            insert.CommandText = "INSERT INTO Executions(TaskId,DueAtUtc,TaskName,StartedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error,RetryOfExecutionId,RetryRootExecutionId,RetryStartPartIndex) VALUES($task,$due,$name,$started,$status,$kind,$recipient,$message,$sent,$total,'',$source,$root,$start); SELECT last_insert_rowid();";
-            insert.Parameters.AddWithValue("$task", root.TaskId); insert.Parameters.AddWithValue("$due", Utc(now)); insert.Parameters.AddWithValue("$name", root.TaskName); insert.Parameters.AddWithValue("$started", Utc(now)); insert.Parameters.AddWithValue("$status", (int)ExecutionStatus.Running); insert.Parameters.AddWithValue("$kind", (int)root.MessageKind); insert.Parameters.AddWithValue("$recipient", root.Recipient); insert.Parameters.AddWithValue("$message", root.Message); insert.Parameters.AddWithValue("$sent", firstPending); insert.Parameters.AddWithValue("$total", root.TotalPartCount); insert.Parameters.AddWithValue("$source", sourceExecutionId); insert.Parameters.AddWithValue("$root", rootId); insert.Parameters.AddWithValue("$start", firstPending);
+            insert.CommandText = "INSERT INTO Executions(TaskId,DueAtUtc,TaskName,StartedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error,RetryOfExecutionId,RetryRootExecutionId,RetryStartPartIndex,ChunkSize,RecipientKind,RecipientName) VALUES($task,$due,$name,$started,$status,$kind,$recipient,$message,$sent,$total,'',$source,$root,$start,$chunk,$recipientKind,$recipientName); SELECT last_insert_rowid();";
+            insert.Parameters.AddWithValue("$task", root.TaskId); insert.Parameters.AddWithValue("$due", Utc(now)); insert.Parameters.AddWithValue("$name", root.TaskName); insert.Parameters.AddWithValue("$started", Utc(now)); insert.Parameters.AddWithValue("$status", (int)ExecutionStatus.Running); insert.Parameters.AddWithValue("$kind", (int)root.MessageKind); insert.Parameters.AddWithValue("$recipient", root.Recipient); insert.Parameters.AddWithValue("$message", root.Message); insert.Parameters.AddWithValue("$sent", firstPending); insert.Parameters.AddWithValue("$total", root.TotalPartCount); insert.Parameters.AddWithValue("$source", sourceExecutionId); insert.Parameters.AddWithValue("$root", rootId); insert.Parameters.AddWithValue("$start", firstPending); insert.Parameters.AddWithValue("$chunk", root.ChunkSize); insert.Parameters.AddWithValue("$recipientKind", (int)root.RecipientKind); insert.Parameters.AddWithValue("$recipientName", root.RecipientName);
             long id;
             try { id = Convert.ToInt64(await insert.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture); }
             catch (SqliteException) { return await RollbackPlanAsync("Ya hay un reintento en curso para esta ejecución."); }
             await tx.CommitAsync(cancellationToken);
-            var retry = new ExecutionRecord(id, root.TaskId, root.TaskName, now, null, ExecutionStatus.Running, root.MessageKind, root.Recipient, root.Message, firstPending, root.TotalPartCount, "") { RetryOfExecutionId = sourceExecutionId, RetryRootExecutionId = rootId, RetryStartPartIndex = firstPending };
+            var retry = new ExecutionRecord(id, root.TaskId, root.TaskName, now, null, ExecutionStatus.Running, root.MessageKind, root.Recipient, root.Message, firstPending, root.TotalPartCount, "") { RetryOfExecutionId = sourceExecutionId, RetryRootExecutionId = rootId, RetryStartPartIndex = firstPending, ChunkSize = root.ChunkSize, RecipientKind = root.RecipientKind, RecipientName = root.RecipientName };
             return new(true, "", root, retry, firstPending);
 
             async Task<ManualRetryPlan> RollbackPlanAsync(string error) { await tx.RollbackAsync(cancellationToken); return new(false, error, null, null, 0); }
@@ -126,16 +159,20 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
         finally { _gate.Release(); }
     }
 
-    public async Task<long> ClaimExecutionAsync(DueOccurrence occurrence, ScheduledTask task, CancellationToken cancellationToken = default)
+    public Task<long> ClaimExecutionAsync(DueOccurrence occurrence, ScheduledTask task, CancellationToken cancellationToken = default) => ClaimExecutionAsync(occurrence, task, 300, cancellationToken);
+
+    public async Task<long> ClaimExecutionAsync(DueOccurrence occurrence, ScheduledTask task, int chunkSize, CancellationToken cancellationToken = default)
     {
+        if (chunkSize < 1) throw new ArgumentOutOfRangeException(nameof(chunkSize));
         await EnsureInitializedAsync(cancellationToken); await _gate.WaitAsync(cancellationToken); try
         {
             await using var db = Open(); using var tx = db.BeginTransaction();
             await using var current = db.CreateCommand(); current.Transaction = tx; current.CommandText = "SELECT UpdatedUtc FROM Tasks WHERE Id=$id AND Enabled=1"; current.Parameters.AddWithValue("$id", task.Id);
             if (await current.ExecuteScalarAsync(cancellationToken) is not string updated || updated != Utc(task.UpdatedUtc)) { await tx.RollbackAsync(cancellationToken); return 0; }
             await using var claim = db.CreateCommand(); claim.Transaction = tx;
-            claim.CommandText = "INSERT OR IGNORE INTO Executions(TaskId,DueAtUtc,TaskName,StartedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error) VALUES($task,$due,$name,$started,$status,$kind,$recipient,'',0,0,''); SELECT changes();";
-            claim.Parameters.AddWithValue("$task", occurrence.TaskId); claim.Parameters.AddWithValue("$due", Utc(occurrence.DueAtUtc)); claim.Parameters.AddWithValue("$name", task.Name); claim.Parameters.AddWithValue("$started", Utc(DateTimeOffset.UtcNow)); claim.Parameters.AddWithValue("$status", (int)ExecutionStatus.Running); claim.Parameters.AddWithValue("$kind", (int)task.MessageKind); claim.Parameters.AddWithValue("$recipient", task.CountryCode + task.PhoneNumber);
+            claim.CommandText = "INSERT OR IGNORE INTO Executions(TaskId,DueAtUtc,TaskName,StartedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error,ChunkSize,RecipientKind,RecipientName) VALUES($task,$due,$name,$started,$status,$kind,$recipient,'',0,0,'',$chunk,$recipientKind,$recipientName); SELECT changes();";
+            var recipient = task.RecipientKind == RecipientKind.Group ? task.GroupJid : task.CountryCode + task.PhoneNumber;
+            claim.Parameters.AddWithValue("$task", occurrence.TaskId); claim.Parameters.AddWithValue("$due", Utc(occurrence.DueAtUtc)); claim.Parameters.AddWithValue("$name", task.Name); claim.Parameters.AddWithValue("$started", Utc(DateTimeOffset.UtcNow)); claim.Parameters.AddWithValue("$status", (int)ExecutionStatus.Running); claim.Parameters.AddWithValue("$kind", (int)task.MessageKind); claim.Parameters.AddWithValue("$recipient", recipient); claim.Parameters.AddWithValue("$chunk", chunkSize); claim.Parameters.AddWithValue("$recipientKind", (int)task.RecipientKind); claim.Parameters.AddWithValue("$recipientName", task.RecipientKind == RecipientKind.Group ? task.GroupName : "");
             if (Convert.ToInt32(await claim.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) == 0) { await tx.RollbackAsync(cancellationToken); return 0; }
             await using var identity = db.CreateCommand(); identity.Transaction = tx; identity.CommandText = "SELECT last_insert_rowid()"; var id = Convert.ToInt64(await identity.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture); await tx.CommitAsync(cancellationToken); return id;
         }
@@ -147,8 +184,8 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
         await EnsureInitializedAsync(cancellationToken); await _gate.WaitAsync(cancellationToken); try
         {
             await using var db = Open(); await using var cmd = db.CreateCommand();
-            cmd.CommandText = "UPDATE Executions SET TaskName=$name,FinishedUtc=$finished,Status=$status,MessageKind=$kind,Recipient=$recipient,Message=$message,SentPartCount=$sent,TotalPartCount=$total,Error=$error WHERE Id=$id";
-            cmd.Parameters.AddWithValue("$id", record.Id); cmd.Parameters.AddWithValue("$name", record.TaskName); cmd.Parameters.AddWithValue("$finished", record.FinishedUtc is null ? DBNull.Value : Utc(record.FinishedUtc.Value)); cmd.Parameters.AddWithValue("$status", (int)record.Status); cmd.Parameters.AddWithValue("$kind", (int)record.MessageKind); cmd.Parameters.AddWithValue("$recipient", record.Recipient); cmd.Parameters.AddWithValue("$message", record.Message); cmd.Parameters.AddWithValue("$sent", record.SentPartCount); cmd.Parameters.AddWithValue("$total", record.TotalPartCount); cmd.Parameters.AddWithValue("$error", record.Error ?? "");
+            cmd.CommandText = "UPDATE Executions SET TaskName=$name,FinishedUtc=$finished,Status=$status,MessageKind=$kind,Recipient=$recipient,Message=$message,SentPartCount=$sent,TotalPartCount=$total,Error=$error,ChunkSize=$chunk,RecipientKind=$recipientKind,RecipientName=$recipientName WHERE Id=$id";
+            cmd.Parameters.AddWithValue("$id", record.Id); cmd.Parameters.AddWithValue("$name", record.TaskName); cmd.Parameters.AddWithValue("$finished", record.FinishedUtc is null ? DBNull.Value : Utc(record.FinishedUtc.Value)); cmd.Parameters.AddWithValue("$status", (int)record.Status); cmd.Parameters.AddWithValue("$kind", (int)record.MessageKind); cmd.Parameters.AddWithValue("$recipient", record.Recipient); cmd.Parameters.AddWithValue("$message", record.Message); cmd.Parameters.AddWithValue("$sent", record.SentPartCount); cmd.Parameters.AddWithValue("$total", record.TotalPartCount); cmd.Parameters.AddWithValue("$error", record.Error ?? ""); cmd.Parameters.AddWithValue("$chunk", record.ChunkSize); cmd.Parameters.AddWithValue("$recipientKind", (int)record.RecipientKind); cmd.Parameters.AddWithValue("$recipientName", record.RecipientName);
             if (await cmd.ExecuteNonQueryAsync(cancellationToken) != 1) throw new InvalidOperationException("The execution claim no longer exists.");
         }
         finally { _gate.Release(); }
@@ -164,10 +201,12 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
         if (_initialized) return; await _gate.WaitAsync(ct); try
         {
             if (_initialized) return; await using var db = Open(); await using var cmd = db.CreateCommand();
-            cmd.CommandText = "PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS Tasks (Id INTEGER PRIMARY KEY AUTOINCREMENT,Name TEXT NOT NULL,Enabled INTEGER NOT NULL,CountryCode TEXT NOT NULL,PhoneNumber TEXT NOT NULL,MessageKind INTEGER NOT NULL,FixedMessage TEXT NOT NULL,AnthropicPrompt TEXT NOT NULL,Schedule TEXT NOT NULL,CreatedUtc TEXT NOT NULL,UpdatedUtc TEXT NOT NULL,AgentWorkingDirectory TEXT NOT NULL DEFAULT '',AgentAllowedTools TEXT NOT NULL DEFAULT '',AgentTimeoutMinutes INTEGER NOT NULL DEFAULT 10); CREATE TABLE IF NOT EXISTS Settings (Id INTEGER PRIMARY KEY CHECK(Id=1),EvolutionBaseUrl TEXT NOT NULL,EvolutionInstanceName TEXT NOT NULL,ProtectedEvolutionApiKey TEXT NOT NULL,AnthropicApiKeyFilePath TEXT NOT NULL,AnthropicModel TEXT NOT NULL); CREATE TABLE IF NOT EXISTS Executions (Id INTEGER PRIMARY KEY AUTOINCREMENT,TaskId INTEGER NOT NULL,DueAtUtc TEXT NOT NULL,TaskName TEXT NOT NULL,StartedUtc TEXT NOT NULL,FinishedUtc TEXT NULL,Status INTEGER NOT NULL,MessageKind INTEGER NOT NULL,Recipient TEXT NOT NULL,Message TEXT NOT NULL,SentPartCount INTEGER NOT NULL,TotalPartCount INTEGER NOT NULL,Error TEXT NOT NULL,RetryOfExecutionId INTEGER NULL,RetryRootExecutionId INTEGER NULL,RetryStartPartIndex INTEGER NULL,UNIQUE(TaskId,DueAtUtc)); CREATE INDEX IF NOT EXISTS IX_Executions_StartedUtc ON Executions(StartedUtc);";
+            cmd.CommandText = "PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS Tasks (Id INTEGER PRIMARY KEY AUTOINCREMENT,Name TEXT NOT NULL,Enabled INTEGER NOT NULL,CountryCode TEXT NOT NULL,PhoneNumber TEXT NOT NULL,MessageKind INTEGER NOT NULL,FixedMessage TEXT NOT NULL,AnthropicPrompt TEXT NOT NULL,Schedule TEXT NOT NULL,CreatedUtc TEXT NOT NULL,UpdatedUtc TEXT NOT NULL,AgentWorkingDirectory TEXT NOT NULL DEFAULT '',AgentAllowedTools TEXT NOT NULL DEFAULT '',AgentTimeoutMinutes INTEGER NOT NULL DEFAULT 10,RecipientKind INTEGER NOT NULL DEFAULT 0,GroupJid TEXT NOT NULL DEFAULT '',GroupName TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS Settings (Id INTEGER PRIMARY KEY CHECK(Id=1),EvolutionBaseUrl TEXT NOT NULL,EvolutionInstanceName TEXT NOT NULL,ProtectedEvolutionApiKey TEXT NOT NULL,AnthropicApiKeyFilePath TEXT NOT NULL,AnthropicModel TEXT NOT NULL,MaximumMessageLength INTEGER NOT NULL DEFAULT 300); CREATE TABLE IF NOT EXISTS WhatsAppGroups (Id TEXT NOT NULL PRIMARY KEY,Name TEXT NOT NULL); CREATE TABLE IF NOT EXISTS Executions (Id INTEGER PRIMARY KEY AUTOINCREMENT,TaskId INTEGER NOT NULL,DueAtUtc TEXT NOT NULL,TaskName TEXT NOT NULL,StartedUtc TEXT NOT NULL,FinishedUtc TEXT NULL,Status INTEGER NOT NULL,MessageKind INTEGER NOT NULL,Recipient TEXT NOT NULL,Message TEXT NOT NULL,SentPartCount INTEGER NOT NULL,TotalPartCount INTEGER NOT NULL,Error TEXT NOT NULL,RetryOfExecutionId INTEGER NULL,RetryRootExecutionId INTEGER NULL,RetryStartPartIndex INTEGER NULL,ChunkSize INTEGER NOT NULL DEFAULT 300,RecipientKind INTEGER NOT NULL DEFAULT 0,RecipientName TEXT NOT NULL DEFAULT '',UNIQUE(TaskId,DueAtUtc)); CREATE INDEX IF NOT EXISTS IX_Executions_StartedUtc ON Executions(StartedUtc);";
             await cmd.ExecuteNonQueryAsync(ct);
             await EnsureColumnAsync(db, "Executions", "RetryOfExecutionId", "INTEGER NULL", ct); await EnsureColumnAsync(db, "Executions", "RetryRootExecutionId", "INTEGER NULL", ct); await EnsureColumnAsync(db, "Executions", "RetryStartPartIndex", "INTEGER NULL", ct);
             await EnsureColumnAsync(db, "Tasks", "AgentWorkingDirectory", "TEXT NOT NULL DEFAULT ''", ct); await EnsureColumnAsync(db, "Tasks", "AgentAllowedTools", "TEXT NOT NULL DEFAULT ''", ct); await EnsureColumnAsync(db, "Tasks", "AgentTimeoutMinutes", "INTEGER NOT NULL DEFAULT 10", ct);
+            await EnsureColumnAsync(db, "Tasks", "RecipientKind", "INTEGER NOT NULL DEFAULT 0", ct); await EnsureColumnAsync(db, "Tasks", "GroupJid", "TEXT NOT NULL DEFAULT ''", ct); await EnsureColumnAsync(db, "Tasks", "GroupName", "TEXT NOT NULL DEFAULT ''", ct);
+            await EnsureColumnAsync(db, "Settings", "MaximumMessageLength", "INTEGER NOT NULL DEFAULT 300", ct); await EnsureColumnAsync(db, "Executions", "ChunkSize", "INTEGER NOT NULL DEFAULT 300", ct); await EnsureColumnAsync(db, "Executions", "RecipientKind", "INTEGER NOT NULL DEFAULT 0", ct); await EnsureColumnAsync(db, "Executions", "RecipientName", "TEXT NOT NULL DEFAULT ''", ct);
             cmd.CommandText = $"CREATE UNIQUE INDEX IF NOT EXISTS IX_Executions_OneRunningRetry ON Executions(RetryRootExecutionId) WHERE RetryRootExecutionId IS NOT NULL AND Status={(int)ExecutionStatus.Running}; UPDATE Executions SET Status={(int)ExecutionStatus.Cancelled},FinishedUtc=COALESCE(FinishedUtc,StartedUtc),Error='Execution interrupted before completion.' WHERE Status={(int)ExecutionStatus.Running};";
             await cmd.ExecuteNonQueryAsync(ct); _initialized = true;
         }
@@ -185,15 +224,15 @@ public sealed class SqliteTaskRepository : ITaskRepository, IAsyncDisposable
     private static async Task<ExecutionRecord?> ReadExecutionInTransactionAsync(SqliteConnection db, SqliteTransaction transaction, long id, CancellationToken ct)
     {
         await using var command = db.CreateCommand(); command.Transaction = transaction;
-        command.CommandText = "SELECT Id,TaskId,TaskName,StartedUtc,FinishedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error,RetryOfExecutionId,RetryRootExecutionId,RetryStartPartIndex FROM Executions WHERE Id=$id"; command.Parameters.AddWithValue("$id", id);
+        command.CommandText = "SELECT Id,TaskId,TaskName,StartedUtc,FinishedUtc,Status,MessageKind,Recipient,Message,SentPartCount,TotalPartCount,Error,RetryOfExecutionId,RetryRootExecutionId,RetryStartPartIndex,ChunkSize,RecipientKind,RecipientName FROM Executions WHERE Id=$id"; command.Parameters.AddWithValue("$id", id);
         await using var reader = await command.ExecuteReaderAsync(ct); return await reader.ReadAsync(ct) ? ReadRecord(reader) : null;
     }
     private static string Utc(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
-    private void BindTask(SqliteCommand cmd, ScheduledTask task) { cmd.Parameters.AddWithValue("$name", task.Name); cmd.Parameters.AddWithValue("$enabled", task.IsEnabled ? 1 : 0); cmd.Parameters.AddWithValue("$country", task.CountryCode); cmd.Parameters.AddWithValue("$phone", task.PhoneNumber); cmd.Parameters.AddWithValue("$kind", (int)task.MessageKind); cmd.Parameters.AddWithValue("$fixed", task.FixedMessage ?? ""); cmd.Parameters.AddWithValue("$prompt", task.AnthropicPrompt ?? ""); cmd.Parameters.AddWithValue("$schedule", JsonSerializer.Serialize(ScheduleDto.From(task.Schedule), _json)); cmd.Parameters.AddWithValue("$created", Utc(task.CreatedUtc)); cmd.Parameters.AddWithValue("$updated", Utc(task.UpdatedUtc)); cmd.Parameters.AddWithValue("$agentDir", task.AgentWorkingDirectory ?? ""); cmd.Parameters.AddWithValue("$agentTools", task.AgentAllowedTools ?? ""); cmd.Parameters.AddWithValue("$agentTimeout", task.AgentTimeoutMinutes); }
-    private ScheduledTask ReadTask(SqliteDataReader r) => new(r.GetInt64(0), r.GetString(1), r.GetInt64(2) != 0, r.GetString(3), r.GetString(4), (MessageKind)r.GetInt32(5), r.GetString(6), r.GetString(7), JsonSerializer.Deserialize<ScheduleDto>(r.GetString(8), _json)!.ToDefinition(), DateTimeOffset.Parse(r.GetString(9), CultureInfo.InvariantCulture), DateTimeOffset.Parse(r.GetString(10), CultureInfo.InvariantCulture)) { AgentWorkingDirectory = r.GetString(11), AgentAllowedTools = r.GetString(12), AgentTimeoutMinutes = r.GetInt32(13) };
+    private void BindTask(SqliteCommand cmd, ScheduledTask task) { cmd.Parameters.AddWithValue("$name", task.Name); cmd.Parameters.AddWithValue("$enabled", task.IsEnabled ? 1 : 0); cmd.Parameters.AddWithValue("$country", task.CountryCode); cmd.Parameters.AddWithValue("$phone", task.PhoneNumber); cmd.Parameters.AddWithValue("$kind", (int)task.MessageKind); cmd.Parameters.AddWithValue("$fixed", task.FixedMessage ?? ""); cmd.Parameters.AddWithValue("$prompt", task.AnthropicPrompt ?? ""); cmd.Parameters.AddWithValue("$schedule", JsonSerializer.Serialize(ScheduleDto.From(task.Schedule), _json)); cmd.Parameters.AddWithValue("$created", Utc(task.CreatedUtc)); cmd.Parameters.AddWithValue("$updated", Utc(task.UpdatedUtc)); cmd.Parameters.AddWithValue("$agentDir", task.AgentWorkingDirectory ?? ""); cmd.Parameters.AddWithValue("$agentTools", task.AgentAllowedTools ?? ""); cmd.Parameters.AddWithValue("$agentTimeout", task.AgentTimeoutMinutes); cmd.Parameters.AddWithValue("$recipientKind", (int)task.RecipientKind); cmd.Parameters.AddWithValue("$groupJid", task.GroupJid ?? ""); cmd.Parameters.AddWithValue("$groupName", task.GroupName ?? ""); }
+    private ScheduledTask ReadTask(SqliteDataReader r) => new(r.GetInt64(0), r.GetString(1), r.GetInt64(2) != 0, r.GetString(3), r.GetString(4), (MessageKind)r.GetInt32(5), r.GetString(6), r.GetString(7), JsonSerializer.Deserialize<ScheduleDto>(r.GetString(8), _json)!.ToDefinition(), DateTimeOffset.Parse(r.GetString(9), CultureInfo.InvariantCulture), DateTimeOffset.Parse(r.GetString(10), CultureInfo.InvariantCulture)) { AgentWorkingDirectory = r.GetString(11), AgentAllowedTools = r.GetString(12), AgentTimeoutMinutes = r.GetInt32(13), RecipientKind = (RecipientKind)r.GetInt32(14), GroupJid = r.GetString(15), GroupName = r.GetString(16) };
     private static async Task<IReadOnlyList<ExecutionRecord>> ReadRecordsAsync(SqliteCommand cmd, CancellationToken ct) { var result = new List<ExecutionRecord>(); await using var r = await cmd.ExecuteReaderAsync(ct); while (await r.ReadAsync(ct)) result.Add(ReadRecord(r)); return result; }
-    private static ExecutionRecord ReadRecord(SqliteDataReader r) => new(r.GetInt64(0), r.GetInt64(1), r.GetString(2), DateTimeOffset.Parse(r.GetString(3), CultureInfo.InvariantCulture), r.IsDBNull(4) ? null : DateTimeOffset.Parse(r.GetString(4), CultureInfo.InvariantCulture), (ExecutionStatus)r.GetInt32(5), (MessageKind)r.GetInt32(6), r.GetString(7), r.GetString(8), r.GetInt32(9), r.GetInt32(10), r.GetString(11)) { RetryOfExecutionId = r.IsDBNull(12) ? null : r.GetInt64(12), RetryRootExecutionId = r.IsDBNull(13) ? null : r.GetInt64(13), RetryStartPartIndex = r.IsDBNull(14) ? null : r.GetInt32(14) };
-    private static void ValidateTask(ScheduledTask task) { ArgumentNullException.ThrowIfNull(task); if (string.IsNullOrWhiteSpace(task.Name)) throw new ArgumentException("A task name is required.", nameof(task)); if (!Digits(task.CountryCode) || !Digits(task.PhoneNumber)) throw new ArgumentException("Country code and phone number must contain ASCII digits only.", nameof(task)); ScheduleCalculator.Validate(task.Schedule); if (task.MessageKind == MessageKind.Fixed && string.IsNullOrEmpty(task.FixedMessage)) throw new ArgumentException("A fixed message is required.", nameof(task)); if (task.MessageKind == MessageKind.AnthropicPrompt && string.IsNullOrWhiteSpace(task.AnthropicPrompt)) throw new ArgumentException("An Anthropic prompt is required.", nameof(task)); if (task.MessageKind == MessageKind.ClaudeCodeAgent) { if (string.IsNullOrWhiteSpace(task.AnthropicPrompt)) throw new ArgumentException("An agent prompt is required.", nameof(task)); if (string.IsNullOrWhiteSpace(task.AgentWorkingDirectory)) throw new ArgumentException("An agent working directory is required.", nameof(task)); if (task.AgentTimeoutMinutes is < 1 or > 120) throw new ArgumentException("The agent timeout must be between 1 and 120 minutes.", nameof(task)); } }
+    private static ExecutionRecord ReadRecord(SqliteDataReader r) => new(r.GetInt64(0), r.GetInt64(1), r.GetString(2), DateTimeOffset.Parse(r.GetString(3), CultureInfo.InvariantCulture), r.IsDBNull(4) ? null : DateTimeOffset.Parse(r.GetString(4), CultureInfo.InvariantCulture), (ExecutionStatus)r.GetInt32(5), (MessageKind)r.GetInt32(6), r.GetString(7), r.GetString(8), r.GetInt32(9), r.GetInt32(10), r.GetString(11)) { RetryOfExecutionId = r.IsDBNull(12) ? null : r.GetInt64(12), RetryRootExecutionId = r.IsDBNull(13) ? null : r.GetInt64(13), RetryStartPartIndex = r.IsDBNull(14) ? null : r.GetInt32(14), ChunkSize = r.GetInt32(15), RecipientKind = (RecipientKind)r.GetInt32(16), RecipientName = r.GetString(17) };
+    private static void ValidateTask(ScheduledTask task) { ArgumentNullException.ThrowIfNull(task); if (string.IsNullOrWhiteSpace(task.Name)) throw new ArgumentException("A task name is required.", nameof(task)); if (!Enum.IsDefined(task.RecipientKind)) throw new ArgumentException("The recipient type is invalid.", nameof(task)); if (task.RecipientKind == RecipientKind.Phone && (!Digits(task.CountryCode) || !Digits(task.PhoneNumber))) throw new ArgumentException("Country code and phone number must contain ASCII digits only.", nameof(task)); if (task.RecipientKind == RecipientKind.Group && string.IsNullOrWhiteSpace(task.GroupJid)) throw new ArgumentException("A WhatsApp group id is required.", nameof(task)); ScheduleCalculator.Validate(task.Schedule); if (task.MessageKind == MessageKind.Fixed && string.IsNullOrEmpty(task.FixedMessage)) throw new ArgumentException("A fixed message is required.", nameof(task)); if (task.MessageKind == MessageKind.AnthropicPrompt && string.IsNullOrWhiteSpace(task.AnthropicPrompt)) throw new ArgumentException("An Anthropic prompt is required.", nameof(task)); if (task.MessageKind == MessageKind.ClaudeCodeAgent) { if (string.IsNullOrWhiteSpace(task.AnthropicPrompt)) throw new ArgumentException("An agent prompt is required.", nameof(task)); if (string.IsNullOrWhiteSpace(task.AgentWorkingDirectory)) throw new ArgumentException("An agent working directory is required.", nameof(task)); if (task.AgentTimeoutMinutes is < 1 or > 120) throw new ArgumentException("The agent timeout must be between 1 and 120 minutes.", nameof(task)); } }
     private static bool Digits(string? text) => !string.IsNullOrEmpty(text) && text.All(c => c is >= '0' and <= '9');
     public ValueTask DisposeAsync() { _gate.Dispose(); return ValueTask.CompletedTask; }
     private sealed record ScheduleDto(ScheduleKind Kind, TimeOnly LocalTime, DateOnly AnchorDate, int[] DaysOfWeek, int IntervalWeeks) { public static ScheduleDto From(ScheduleDefinition s) => new(s.Kind, s.LocalTime, s.AnchorDate, s.DaysOfWeek.Select(x => (int)x).ToArray(), s.IntervalWeeks); public ScheduleDefinition ToDefinition() => new(Kind, LocalTime, AnchorDate, DaysOfWeek.Select(x => (DayOfWeek)x).ToHashSet(), IntervalWeeks); }

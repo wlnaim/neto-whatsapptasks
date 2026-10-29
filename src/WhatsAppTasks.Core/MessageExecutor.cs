@@ -2,13 +2,16 @@ namespace WhatsAppTasks.Core;
 
 public sealed class MessageExecutor
 {
-    private readonly ITaskRepository _repository; private readonly IEvolutionClient _evolution; private readonly IAnthropicClient _anthropic; private readonly IMessageSplitter _splitter; private readonly IAsyncDelay _delay; private readonly IClaudeCodeRunner? _claudeCode;
-    public MessageExecutor(ITaskRepository repository, IEvolutionClient evolution, IAnthropicClient anthropic, IMessageSplitter splitter, IAsyncDelay delay, IClaudeCodeRunner? claudeCode = null) { _claudeCode = claudeCode; _repository = repository; _evolution = evolution; _anthropic = anthropic; _splitter = splitter; _delay = delay; }
+    private readonly ITaskRepository _repository; private readonly IEvolutionClient _evolution; private readonly IAnthropicClient _anthropic; private readonly IMessageSplitter _splitter; private readonly IAsyncDelay _delay; private readonly IClaudeCodeRunner? _claudeCode; private readonly IAppLogger _logger;
+    public MessageExecutor(ITaskRepository repository, IEvolutionClient evolution, IAnthropicClient anthropic, IMessageSplitter splitter, IAsyncDelay delay, IClaudeCodeRunner? claudeCode = null, IAppLogger? logger = null) { _claudeCode = claudeCode; _repository = repository; _evolution = evolution; _anthropic = anthropic; _splitter = splitter; _delay = delay; _logger = logger ?? NullAppLogger.Instance; }
 
     public async Task<ExecutionRecord> ExecuteAsync(ScheduledTask task, DateTimeOffset dueAtUtc, CancellationToken cancellationToken = default)
     {
-        var id = await _repository.ClaimExecutionAsync(new(task.Id, dueAtUtc), task, cancellationToken);
-        var recipient = task.CountryCode + task.PhoneNumber; var started = DateTimeOffset.UtcNow;
+        using var scope = _logger.BeginScope(AppLogOperation.MessageSend);
+        var settings = await _repository.GetSettingsAsync(cancellationToken);
+        var chunkSize = settings.MaximumMessageLength;
+        var id = await _repository.ClaimExecutionAsync(new(task.Id, dueAtUtc), task, chunkSize, cancellationToken);
+        var recipient = task.RecipientKind == RecipientKind.Group ? task.GroupJid : task.CountryCode + task.PhoneNumber; var recipientName = task.RecipientKind == RecipientKind.Group ? task.GroupName : ""; var started = DateTimeOffset.UtcNow;
         if (id == 0) return new(0, task.Id, task.Name, started, started, ExecutionStatus.Skipped, task.MessageKind, recipient, "", 0, 0, "The task was changed, deleted, disabled, or already claimed.");
         var message = task.FixedMessage; var parts = Array.Empty<string>(); var sent = 0; var status = ExecutionStatus.Failed; var error = "";
         try
@@ -26,30 +29,30 @@ public sealed class MessageExecutor
                 if (!generated.Success) { error = SafeError(generated.Error, "Agent execution failed."); return await FinishAsync(); }
                 message = generated.Text;
             }
-            parts = _splitter.Split(message).ToArray();
+            parts = _splitter.Split(message, chunkSize).ToArray();
             await SaveProgressAsync();
             for (var index = 0; index < parts.Length; index++)
             {
                 if (!await IsStillCurrentAsync()) { status = sent == 0 ? ExecutionStatus.Skipped : ExecutionStatus.Partial; error = "The task was changed, deleted, or disabled before the remaining message parts were sent."; return await FinishAsync(); }
                 var result = await _evolution.SendTextAsync(recipient, parts[index], cancellationToken);
-                if (!result.Success) { status = sent == 0 ? ExecutionStatus.Failed : ExecutionStatus.Partial; error = SafeError(result.Error, "Message sending failed."); return await FinishAsync(); }
+                if (!result.Success) { _logger.Write(AppLogEvent.MessageSendFailed); status = sent == 0 ? ExecutionStatus.Failed : ExecutionStatus.Partial; error = SafeError(result.Error, "Message sending failed."); return await FinishAsync(); }
                 sent++;
                 await SaveProgressAsync();
                 if (index < parts.Length - 1) await _delay.DelayAsync(TimeSpan.FromSeconds(5), cancellationToken);
             }
             status = ExecutionStatus.Succeeded;
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { status = ExecutionStatus.Cancelled; error = "Execution cancelled."; }
-        catch { status = sent == 0 ? ExecutionStatus.Failed : ExecutionStatus.Partial; error = "Message execution could not be completed."; }
+        catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested) { _logger.Write(AppLogEvent.MessageSendFailed, exception: ex); status = ExecutionStatus.Cancelled; error = "Execution cancelled."; }
+        catch (Exception ex) { _logger.Write(AppLogEvent.MessageSendFailed, exception: ex); status = sent == 0 ? ExecutionStatus.Failed : ExecutionStatus.Partial; error = "Message execution could not be completed."; }
         return await FinishAsync();
 
         async Task<ExecutionRecord> FinishAsync()
         {
-            var record = new ExecutionRecord(id, task.Id, task.Name, started, DateTimeOffset.UtcNow, status, task.MessageKind, recipient, message, sent, parts.Length, error);
+            var record = new ExecutionRecord(id, task.Id, task.Name, started, DateTimeOffset.UtcNow, status, task.MessageKind, recipient, message, sent, parts.Length, error) { ChunkSize = chunkSize, RecipientKind = task.RecipientKind, RecipientName = recipientName };
             await _repository.CompleteExecutionAsync(record, CancellationToken.None); return record;
         }
 
-        async Task SaveProgressAsync() => await _repository.CompleteExecutionAsync(new ExecutionRecord(id, task.Id, task.Name, started, null, ExecutionStatus.Running, task.MessageKind, recipient, message, sent, parts.Length, ""), CancellationToken.None);
+        async Task SaveProgressAsync() => await _repository.CompleteExecutionAsync(new ExecutionRecord(id, task.Id, task.Name, started, null, ExecutionStatus.Running, task.MessageKind, recipient, message, sent, parts.Length, "") { ChunkSize = chunkSize, RecipientKind = task.RecipientKind, RecipientName = recipientName }, CancellationToken.None);
         async Task<bool> IsStillCurrentAsync()
         {
             var current = await _repository.GetTaskAsync(task.Id, CancellationToken.None);
@@ -60,23 +63,24 @@ public sealed class MessageExecutor
     /// <summary>Replays only pending fragments from the durable historical snapshot; it never reads a Task or Anthropic.</summary>
     public async Task<ExecutionRecord> ExecuteManualRetryAsync(ManualRetryPlan plan, CancellationToken cancellationToken = default)
     {
+        using var scope = _logger.BeginScope(AppLogOperation.MessageSend);
         if (!plan.Accepted || plan.RootExecution is null || plan.RetryExecution is null) throw new ArgumentException("A claimed retry plan is required.", nameof(plan));
         var root = plan.RootExecution; var record = plan.RetryExecution; var parts = Array.Empty<string>(); var sent = plan.FirstPendingPart; var status = ExecutionStatus.Failed; var error = "";
         try
         {
-            parts = _splitter.Split(root.Message).ToArray();
+            parts = _splitter.Split(root.Message, root.ChunkSize).ToArray();
             if (parts.Length != root.TotalPartCount || sent < 0 || sent >= parts.Length) { error = "The saved execution parts are inconsistent."; return await FinishAsync(error); }
             for (var index = sent; index < parts.Length; index++)
             {
                 var result = await _evolution.SendTextAsync(root.Recipient, parts[index], cancellationToken);
-                if (!result.Success) { status = sent == plan.FirstPendingPart ? ExecutionStatus.Failed : ExecutionStatus.Partial; error = SafeError(result.Error, "Message sending failed."); return await FinishAsync(error); }
+                if (!result.Success) { _logger.Write(AppLogEvent.MessageSendFailed); status = sent == plan.FirstPendingPart ? ExecutionStatus.Failed : ExecutionStatus.Partial; error = SafeError(result.Error, "Message sending failed."); return await FinishAsync(error); }
                 sent++; await SaveProgressAsync();
                 if (index < parts.Length - 1) await _delay.DelayAsync(TimeSpan.FromSeconds(5), cancellationToken);
             }
             status = ExecutionStatus.Succeeded;
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { status = ExecutionStatus.Cancelled; error = "Execution cancelled."; }
-        catch { status = sent == plan.FirstPendingPart ? ExecutionStatus.Failed : ExecutionStatus.Partial; error = "Message execution could not be completed."; }
+        catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested) { _logger.Write(AppLogEvent.MessageSendFailed, exception: ex); status = ExecutionStatus.Cancelled; error = "Execution cancelled."; }
+        catch (Exception ex) { _logger.Write(AppLogEvent.MessageSendFailed, exception: ex); status = sent == plan.FirstPendingPart ? ExecutionStatus.Failed : ExecutionStatus.Partial; error = "Message execution could not be completed."; }
         return await FinishAsync(error);
 
         async Task SaveProgressAsync() => await _repository.CompleteExecutionAsync(record with { FinishedUtc = null, Status = ExecutionStatus.Running, SentPartCount = sent, TotalPartCount = parts.Length, Error = "" }, CancellationToken.None);

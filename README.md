@@ -5,6 +5,7 @@ Un programa para **Windows** que envía mensajes de WhatsApp **solos, a la hora 
 Ejemplos de lo que puedes hacer:
 
 - Mandar "Buenos días, la junta es a las 9" todos los días de lunes a viernes.
+- Programar mensajes para un teléfono o un grupo de WhatsApp y suspender tareas cuando lo necesites.
 - Que una inteligencia artificial (IA) escriba cada día un mensaje distinto para tu mamá, tu equipo o tus clientes, **sin que parezca escrito por una IA**.
 - Que la IA consulte una página web o tu tablero de trabajo, haga un **resumen** y te lo mande por WhatsApp a las 9:00.
 
@@ -158,6 +159,7 @@ Al terminar tendrás la carpeta **publish** con el programa `WhatsAppTasks.App.e
    | Nombre del servicio | El nombre de tu instancia (paso 4), por ejemplo `MiWhatsApp` |
    | Archivo ApiKey Anthropic | *(Solo si usarás IA)* ruta de un archivo `.txt` que contenga únicamente tu clave de Anthropic, guardado **fuera** de esta carpeta |
    | Modelo Anthropic | `claude-haiku-5-5` (rápido y barato; puedes cambiarlo por otro modelo de tu cuenta) |
+   | Máximo de caracteres por mensaje | `300` inicialmente; puedes guardar otro entero positivo |
 
    ![Pestaña Configuración](docs/img/03-configuracion.png)
 
@@ -235,6 +237,22 @@ En la pestaña **Historial**, clic derecho sobre un envío fallido → **Reinten
 - Las tareas tipo **Agente** ejecutan Claude Code en tu equipo con las herramientas que le permitas. Dale solo las necesarias; lo que responda se enviará por WhatsApp tal cual.
 
 ---
+
+## Suspensión, grupos y tamaño de mensajes
+
+En la barra de acciones del listado de tareas se ofrece **Suspender** para tareas activas y **Habilitar** para tareas suspendidas. La suspensión conserva la configuración y dura hasta habilitarla manualmente; los envíos vencidos se omiten.
+
+El destinatario puede ser **Teléfono** o **Grupo**. Primero usa **Configuración → Cargar catálogo de grupos** y luego selecciona el grupo por nombre en el editor. El identificador completo del grupo se envía sin añadir código de país. Actualizar el catálogo reemplaza su contenido local con los grupos válidos. Los grupos sin nombre o con datos inválidos se omiten, y la ventana muestra cuántos se importaron y cuántos se descartaron. Si la respuesta válida está vacía o todos sus grupos se omiten, el catálogo local queda vacío. Un fallo de conexión, una respuesta ilegible o un error de almacenamiento conserva el catálogo anterior. Las tareas guardadas conservan su grupo aunque deje de aparecer en el catálogo.
+
+En **Configuración** puedes cambiar el máximo de caracteres por mensaje para nuevas ejecuciones (300 inicialmente). Cada ejecución guarda el tamaño utilizado: sus reintentos conservan las mismas partes aunque después cambie el valor global. La pausa entre partes sigue siendo de cinco segundos. Los pares Unicode se conservan completos; un emoji de dos unidades UTF-16 permanece unido incluso con límite 1.
+
+## Registro de errores
+
+La aplicación crea una carpeta **Logs junto a `WhatsAppTasks.App.exe`**, incluso si se usa una ubicación distinta para la base de datos. Registra el inicio, los errores de la interfaz, los envíos, el programador y las etapas de sincronización de grupos. El aviso de error muestra la ruta y un identificador para localizar el intento correspondiente.
+
+Los archivos usan formato JSONL, rotación por tamaño y una retención máxima de siete días. Los diagnósticos evitan guardar claves, mensajes, prompts, nombres de grupos, identificadores completos y respuestas del servidor. Las omisiones de grupos incluyen un motivo y su posición en la respuesta.
+
+Los logs y las bases de datos son archivos locales de uso: no deben añadirse a Git ni compartirse públicamente. Si se solicita un diagnóstico, revisa primero su contenido y comparte únicamente lo necesario.
 
 ## Más información técnica
 
